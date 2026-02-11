@@ -1,4 +1,5 @@
 import os
+import sys
 import pandas as pd
 import configparser
 import logging
@@ -12,36 +13,99 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 def create_summary_dashboard(writer, df, date_str):
     """
-    Creates a 'Summary_Dashboard' sheet with rich formatting.
+    Creates a 'Summary_Dashboard' sheet with rich formatting based on specific Failure Mode logic.
     """
     workbook = writer.book
     sheet_name = 'Summary_Dashboard'
     
-    # 1. Prepare Data
-    # Fail is where Total_Result != 'OK'
-    df['is_fail'] = df['Total_Result'].apply(lambda x: 0 if str(x).strip().upper() == 'OK' else 1)
+    # --- 1. Data Pre-processing & Logic Implementation ---
     
-    # Placeholders for failure modes (Noise, Index Fail, RPM NG)
-    # Checking Intelligent_Control or Section columns for keywords
-    df['noise_fail'] = df.apply(lambda row: 1 if 'noise' in str(row.get('Intelligent_Control', '')).lower() or 'noise' in str(row.get('Section', '')).lower() else 0, axis=1)
-    df['index_fail'] = df.apply(lambda row: 1 if 'index' in str(row.get('Intelligent_Control', '')).lower() or 'index' in str(row.get('Section', '')).lower() else 0, axis=1)
-    df['rpm_fail'] = df.apply(lambda row: 1 if 'rpm' in str(row.get('Intelligent_Control', '')).lower() or 'rpm' in str(row.get('Section', '')).lower() else 0, axis=1)
-    df['barcode_fail'] = df.apply(lambda row: 1 if 'barcode' in str(row.get('Intelligent_Control', '')).lower() or 'barcode' in str(row.get('Section', '')).lower() else 0, axis=1)
+    # A. Convert critical columns to Numeric to ensure '>' and '<' work correctly
+    # Coerce errors will turn non-numbers into NaN, then we fill with 0
+    numeric_cols = ['index1', 'index1_limit', 'index2', 'index2_limit', 'RPM', 'RPM_Low']
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        else:
+            df[col] = 0 # Handle missing columns safely
 
-    lines = sorted(df['Line_Name'].unique())
+    # B. Define Basic Conditions (Boolean Masks)
+    # Note: str(x) is used to handle potential non-string data in text columns
     
-    # Start writing at row 1
+    # Condition: Rotating (RPM != 0)
+    cond_rotating = (df['RPM'] != 0)
+    
+    # Condition: Index 1 Fail (Value > Limit)
+    cond_idx1_high = (df['index1'] > df['Index1_Limit'])
+    
+    # Condition: Index 2 Fail (Value > Limit)
+    cond_idx2_high = (df['index2'] > df['Index2_Limit'])
+    
+    # Condition: Out of control (User defined: RPM > RPM_Low)
+    cond_out_of_control = (df['RPM'] > df['RPM_Low'])+(df['RPM'] > 10000)
+    
+    # Condition: No rotate (RPM == 0)
+    cond_no_rotate = (df['RPM'] == 0)
+
+    # Condition: String searches
+    def check_keyword(row, keyword):
+        s1 = str(row.get('Intelligent_Control', '')).lower()
+        s2 = str(row.get('Section', '')).lower()
+        return keyword in s1 or keyword in s2
+
+    # --- 2. Calculate Final Categories (0 or 1) ---
+
+    # 1. Total Fail (Total_Result != OK)
+    df['is_fail'] = df['Total_Result'].apply(lambda x: 0 if str(x).strip().upper() == 'OK' else 1)
+
+    # 2. Noise (Search "noise")
+    df['calc_noise'] = ((cond_idx1_high) & (~cond_idx2_high) & (cond_rotating)).astype(int)+((cond_idx2_high) & (~cond_idx1_high) & (cond_rotating)).astype(int)+((cond_idx1_high) & (cond_idx2_high) & (cond_rotating)).astype(int)+df.apply(lambda row: 1 if str(row.get('Intelligent_Control','')).strip().upper() == 'OK' and str(row.get('Total_Result','')).strip().upper() != 'OK' else 0, axis=1)
+
+    # 3. Only Index1 Fail (Index1 > Limit AND Index2 <= Limit AND RPM != 0)
+    df['calc_only_idx1'] = ((cond_idx1_high) & (~cond_idx2_high) & (cond_rotating)).astype(int)
+
+    # 4. Only Index2 Fail (Index2 > Limit AND Index1 <= Limit AND RPM != 0)
+    df['calc_only_idx2'] = ((cond_idx2_high) & (~cond_idx1_high) & (cond_rotating)).astype(int)
+
+    # 5. Index 1 & 2 both Fail (Both > Limit AND RPM != 0)
+    df['calc_both_idx'] = ((cond_idx1_high) & (cond_idx2_high) & (cond_rotating)).astype(int)
+
+    # 6. Spec Fail (Intelligent_Control == OK BUT Total_Result == NG)
+    # Note: Implicitly means indexes are within limits but result is NG
+    df['calc_spec_fail'] = df.apply(lambda row: 1 if str(row.get('Intelligent_Control','')).strip().upper() == 'OK' and str(row.get('Total_Result','')).strip().upper() != 'OK' else 0, axis=1)
+
+    # 7. Out of control (RPM > RPM_Low)
+    df['calc_out_control'] = cond_out_of_control.astype(int)
+
+    # 8. No rotate (RPM == 0)
+    df['calc_no_rotate'] = cond_no_rotate.astype(int)
+
+    # 9. RPM NG (Out of control OR No rotate)
+    df['calc_rpm_ng'] = ((cond_out_of_control) | (cond_no_rotate)).astype(int)
+
+    # 10. PauseOrFreeRun (Model_Name contains "Pauseorfreerun")
+    df['calc_pause'] = df['Model_Name'].apply(lambda x: 1 if 'pauseorfreerun' in str(x).lower().replace(" ", "") else 0)
+
+    # 11. No Barcode (Barcode is empty/NaN)
+    df['calc_no_barcode'] = df['Barcode'].apply(lambda x: 1 if pd.isna(x) or str(x).strip() == '' else 0)
+
+    # 12. Others (Pause + No Barcode)
+    df['calc_others'] = ((df['calc_pause'] == 1) | (df['calc_no_barcode'] == 1)).astype(int)
+
+
+    # --- 3. Dashboard Generation ---
+    lines = sorted(df['Line_Name'].unique())
     current_row = 1
     
     # Styles
-    gold_fill = PatternFill(start_color='FFD700', end_color='FFD700', fill_type='solid')
-    blue_fill = PatternFill(start_color='ADD8E6', end_color='ADD8E6', fill_type='solid')
-    green_fill = PatternFill(start_color='90EE90', end_color='90EE90', fill_type='solid')
+    gold_fill = PatternFill(start_color='FFD700', end_color='FFD700', fill_type='solid') # Yellow
+    blue_fill = PatternFill(start_color='ADD8E6', end_color='ADD8E6', fill_type='solid') # Blue
+    green_fill = PatternFill(start_color='90EE90', end_color='90EE90', fill_type='solid') # Green
+    white_fill = PatternFill(start_color='FFFFFF', end_color='FFFFFF', fill_type='solid')
     thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
     header_font = Font(bold=True)
     center_align = Alignment(horizontal='center', vertical='center')
 
-    # Create sheet if it doesn't exist
     if sheet_name not in workbook.sheetnames:
         workbook.create_sheet(sheet_name)
     ws = workbook[sheet_name]
@@ -50,7 +114,7 @@ def create_summary_dashboard(writer, df, date_str):
         line_df = df[df['Line_Name'] == line]
         stations = sorted(line_df['Device_ID'].unique())
         
-        # Header: Line Name (Merged)
+        # Header: Line Name
         ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=len(stations)+2)
         cell = ws.cell(row=current_row, column=1, value=line)
         cell.font = Font(bold=True, size=14)
@@ -66,29 +130,43 @@ def create_summary_dashboard(writer, df, date_str):
             c.alignment = center_align
         current_row += 1
 
-        # Metrics definition: (Label, logic_col, fill_style, is_rate)
-        metrics = [
-            ('Total Count', None, gold_fill, False),
-            ('Fail Count', 'is_fail', gold_fill, False),
-            ('Fail Rate', 'is_fail', gold_fill, True),
-            ('Noise Issues', 'noise_fail', blue_fill, False),
-            ('Index Issues', 'index_fail', blue_fill, False),
-            ('RPM Issues', 'rpm_fail', green_fill, False),
-            ('Barcode Issues', 'barcode_fail', green_fill, False),
+        # Metrics Definition (Label, Column_Name, Fill_Color, Is_Rate, Is_String)
+        # Order matches user request
+        metrics_config = [
+            ('Total Count',         None,               gold_fill,  False, False),
+            ('Fail Count',          'is_fail',          gold_fill,  False, False),
+            ('Fail Rate',           'is_fail',          gold_fill,  True,  False),
+            ('Noise',               'calc_noise',       blue_fill,  False, False),
+            ('Only Index1 Fail',    'calc_only_idx1',   blue_fill,  False, False),
+            ('Only Index2 Fail',    'calc_only_idx2',   blue_fill,  False, False),
+            ('Index 1 & 2 both Fail','calc_both_idx',   blue_fill,  False, False),
+            ('Spec Fail',           'calc_spec_fail',   blue_fill,  False, False),
+            ('RPM NG',              'calc_rpm_ng',      green_fill, False, False),
+            ('Out of control',      'calc_out_control', green_fill, False, False),
+            ('No rotate',           'calc_no_rotate',   green_fill, False, False),
+            ('Others',              'calc_others',      green_fill, False, False),
+            ('PauseOrFreeRun',      'calc_pause',       green_fill, False, False),
+            ('No Barcode',          'calc_no_barcode',  green_fill, False, False),
+            ('Model Name',          'Model_Name',       white_fill, False, True),
         ]
 
-        for label, col, fill, is_rate in metrics:
-            # Label cell
-            ws.cell(row=current_row, column=1, value=label).border = thin_border
+        for label, col, fill, is_rate, is_string in metrics_config:
+            # Metric Label
+            c_label = ws.cell(row=current_row, column=1, value=label)
+            c_label.border = thin_border
             
-            # Line Total
-            if label == 'Total Count':
+            # --- Total Column Logic ---
+            if is_string:
+                # For Model Name, show Unique values joined by comma
+                val = ",".join(line_df[col].dropna().unique().astype(str))
+            elif label == 'Total Count':
                 val = len(line_df)
             elif is_rate:
                 total = len(line_df)
                 fails = line_df[col].sum()
                 val = f"{(fails/total)*100:.2f}%" if total > 0 else "0.00%"
             else:
+                # Normal Sum
                 val = line_df[col].sum()
             
             c_total = ws.cell(row=current_row, column=2, value=val)
@@ -96,10 +174,15 @@ def create_summary_dashboard(writer, df, date_str):
             c_total.border = thin_border
             c_total.alignment = center_align
 
-            # Station levels
+            # --- Station Columns Logic ---
             for i, station in enumerate(stations):
                 st_df = line_df[line_df['Device_ID'] == station]
-                if label == 'Total Count':
+                
+                if is_string:
+                    # Take the first non-empty Model Name found for this station
+                    unique_names = st_df[col].dropna().unique()
+                    st_val = str(unique_names[0]) if len(unique_names) > 0 else ""
+                elif label == 'Total Count':
                     st_val = len(st_df)
                 elif is_rate:
                     total = len(st_df)
@@ -115,30 +198,51 @@ def create_summary_dashboard(writer, df, date_str):
             
             current_row += 1
         
-        current_row += 1 # Spacer between lines
+        current_row += 1 # Spacer
 
 def run_aggregation(target_date=None):
     """
-    Aggregate distributed factory log files for a specific date.
-    :param target_date: String in 'YYYYMMDD' format. Defaults to yesterday.
+    Aggregate distributed factory log files.
     """
-    config = configparser.ConfigParser()
-    config.read('factory-aggregator/config.ini', encoding='utf-8')
+    # 1. Robust Config Path Resolution
+    if getattr(sys, 'frozen', False):
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    config_path = os.path.join(base_dir, 'config.ini')
 
-    source_dir = config['Path']['Source_Folder']
-    output_dir = config['Path']['Output_Folder'].replace('.\\', 'factory-aggregator/') # Cross-platform tweak
+    # Config Check
+    if not os.path.exists(config_path):
+        logging.error(f"Config file NOT found at: {config_path}")
+        return
+
+    config = configparser.ConfigParser()
+    config.read(config_path, encoding='utf-8')
+
+    try:
+        source_dir = config['Path']['Source_Folder']
+        output_base = config['Path']['Output_Folder']
+        # Handle relative output paths
+        if output_base.startswith('.\\') or output_base.startswith('./'):
+            output_dir = os.path.join(base_dir, output_base.replace('.\\', '').replace('./', ''))
+        else:
+            output_dir = output_base
+    except KeyError as e:
+        logging.error(f"Config file missing key: {e}")
+        return
     
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    # 1. Handle Date (Default to Yesterday)
+    # 2. Handle Date
     if target_date is None:
         from datetime import timedelta
         target_date = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
     
     logging.info(f"Starting aggregation for date: {target_date}")
 
-    # 2. Map Devices
+    # 3. Map Devices
     device_map = {}
     if 'Device_Mapping' in config:
         for ip, mapping in config['Device_Mapping'].items():
@@ -148,7 +252,7 @@ def run_aggregation(target_date=None):
             except ValueError:
                 logging.error(f"Malformed mapping for IP {ip}: {mapping}")
 
-    # 3. Find relevant files
+    # 4. Search Files
     search_pattern = os.path.join(source_dir, f"{target_date}_*.txt")
     files = glob.glob(search_pattern)
     
@@ -158,7 +262,7 @@ def run_aggregation(target_date=None):
 
     all_data = []
 
-    # 4. Process each file
+    # 5. Process Files
     for file_path in files:
         filename = os.path.basename(file_path)
         match = re.match(rf"{target_date}_(.+)\.txt", filename)
@@ -169,33 +273,61 @@ def run_aggregation(target_date=None):
         meta = device_map.get(ip_key, {'Line': 'Unknown_Line', 'Station': f'Unknown_{ip_key}'})
 
         try:
-            df = pd.read_csv(file_path) 
+            # Robust Reading: Tab separator, CP950 encoding, Skip bad lines, No index column
+            df = pd.read_csv(file_path, sep='\t', encoding='cp950', on_bad_lines='skip', index_col=False)
+            
+            # Header Cleaning (Trim whitespace)
+            df.columns = df.columns.str.strip()
+            
+            # Check essential column
+            if 'Total_Result' not in df.columns:
+                logging.warning(f"Skipping {filename}: Missing 'Total_Result'")
+                continue
+
             df['Line_Name'] = meta['Line']
             df['Device_ID'] = meta['Station']
             df['Source_IP'] = ip_key.replace('_', '.')
             df['Log_Date'] = target_date
+            
+            # Convert Result to string to be safe
+            df['Total_Result'] = df['Total_Result'].astype(str)
+            
             all_data.append(df)
             logging.info(f"Processed: {filename} ({len(df)} rows)")
+
+        except UnicodeDecodeError:
+            # Fallback to UTF-8
+            try:
+                df = pd.read_csv(file_path, sep='\t', encoding='utf-8', on_bad_lines='skip', index_col=False)
+                df.columns = df.columns.str.strip()
+                df['Line_Name'] = meta['Line']
+                df['Device_ID'] = meta['Station']
+                df['Source_IP'] = ip_key.replace('_', '.')
+                df['Log_Date'] = target_date
+                df['Total_Result'] = df['Total_Result'].astype(str)
+                all_data.append(df)
+                logging.info(f"Processed (UTF-8): {filename}")
+            except Exception as e2:
+                logging.error(f"Failed {filename} with UTF-8: {e2}")
+
         except Exception as e:
             logging.error(f"Failed to read {filename}: {e}")
 
-    # 5. Merge and Export to Excel
+    # 6. Export
     if all_data:
         master_df = pd.concat(all_data, ignore_index=True)
         output_file = os.path.join(output_dir, f"Daily_Summary_{target_date}.xlsx")
         
-        # Use ExcelWriter with openpyxl engine
         with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
-            # Sheet 1: Raw Data (Named exactly as target_date)
+            # Sheet 1: Raw Data
             master_df.to_excel(writer, sheet_name=target_date, index=False)
             
-            # Sheet 2: Summary Dashboard
+            # Sheet 2: Dashboard
             create_summary_dashboard(writer, master_df, target_date)
             
-        logging.info(f"Successfully aggregated {len(files)} files into {output_file}")
-        logging.info(f"Total rows: {len(master_df)}")
+        logging.info(f"Aggregation Complete. File: {output_file}")
     else:
-        logging.warning("No data was successfully read. Output file not created.")
+        logging.warning("No valid data found.")
 
 if __name__ == "__main__":
     run_aggregation()
