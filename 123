@@ -70,7 +70,6 @@ def create_summary_dashboard(writer, df, date_str):
     lines = sorted(df['Line_Name'].unique())
     
     # Dictionary to store detected locations for each mode
-    # Format: { 'Mode Name': ['Line1-Station1', 'Line2-Station3'] }
     detected_failures = {
         'Carrier Abnormal': [],
         'Test Pin Abnormal': [],
@@ -79,6 +78,20 @@ def create_summary_dashboard(writer, df, date_str):
         'Isolation Box Abnormal': [],
         'Check Audio File': []
     }
+
+    # Helper function for CXX-NoX format
+    def format_location(line_str, station_str=None):
+        # 1. Process Line (Line_13 -> C13)
+        l_nums = re.findall(r'\d+', str(line_str))
+        l_code = f"C{int(l_nums[0]):02d}" if l_nums else str(line_str)
+        
+        # 2. Process Station (Station_1 -> No1)
+        if station_str:
+            s_nums = re.findall(r'\d+', str(station_str))
+            s_code = f"No{int(s_nums[0])}" if s_nums else str(station_str)
+            return f"{l_code}-{s_code}"
+        
+        return l_code
 
     for line in lines:
         line_df = df[df['Line_Name'] == line]
@@ -111,21 +124,28 @@ def create_summary_dashboard(writer, df, date_str):
                 'cable_fail_count': cable_fail_count
             }
 
-        # Logic 1: Carrier Abnormal (Line Level)
-        # All stations RPM > 1.5% OR All stations Other > 1.5%
+        # Failure Mode 1: Carrier Abnormal (Line Level)
+        # Condition: (All > 1% AND Spread <= 3%)
         if stations:
-            all_rpm_high = all(st_stats[s]['rpm_rate'] > 0.015 for s in stations)
-            all_other_high = all(st_stats[s]['other_rate'] > 0.015 for s in stations)
-            if all_rpm_high or all_other_high:
-                detected_failures['Carrier Abnormal'].append(f"{line} (All Stations)")
+            rpm_rates = [st_stats[s]['rpm_rate'] for s in stations]
+            other_rates = [st_stats[s]['other_rate'] for s in stations]
 
-        # Logic 2: Test Pin Abnormal (Station Level)
-        # Single Station RPM > 2% OR Other > 2%
+            all_rpm_high = all(r > 0.01 for r in rpm_rates)
+            all_other_high = all(r > 0.01 for r in other_rates)
+
+            rpm_consistent = (max(rpm_rates) - min(rpm_rates) <= 0.03) if rpm_rates else False
+            other_consistent = (max(other_rates) - min(other_rates) <= 0.03) if other_rates else False
+            
+            if (all_rpm_high and rpm_consistent) or (all_other_high and other_consistent):
+                short_code = format_location(line)
+                detected_failures['Carrier Abnormal'].append(f"{short_code}-All")
+
+        # Failure Mode 2: Test Pin Abnormal (Station Level)
         for s in stations:
             if (st_stats[s]['rpm_rate'] > 0.02) or (st_stats[s]['other_rate'] > 0.02):
-                detected_failures['Test Pin Abnormal'].append(f"{line}-{s}")
+                detected_failures['Test Pin Abnormal'].append(format_location(line, s))
 
-        # Logic 3, 5, 6: Relative Comparison (Needs >1 station)
+        # Failure Mode 3, 5, 6: Relative Comparison
         if len(stations) > 1:
             for s in stations:
                 other_stations = [os for os in stations if os != s]
@@ -135,23 +155,22 @@ def create_summary_dashboard(writer, df, date_str):
                 others_idx2_mean = sum(st_stats[os]['idx2_mean'] for os in other_stations) / len(other_stations)
                 
                 if (st_stats[s]['idx1_mean'] < others_idx1_mean * 0.8) or (st_stats[s]['idx2_mean'] < others_idx2_mean * 0.8):
-                    detected_failures['Mic Position Variant'].append(f"{line}-{s}")
+                    detected_failures['Mic Position Variant'].append(format_location(line, s))
 
                 # Logic 5: Isolation Box
                 others_dba_mean = sum(st_stats[os]['dba_mean'] for os in other_stations) / len(other_stations)
-                # Only compare if others exist and are non-zero (avoid div/0 or noise)
                 if others_dba_mean > 0:
                     if st_stats[s]['dba_mean'] > others_dba_mean * 1.1:
-                         detected_failures['Isolation Box Abnormal'].append(f"{line}-{s}")
+                         detected_failures['Isolation Box Abnormal'].append(format_location(line, s))
 
                 # Logic 6: Check Audio
                 if (st_stats[s]['idx1_mean'] > others_idx1_mean * 1.3) or (st_stats[s]['idx2_mean'] > others_idx2_mean * 1.3):
-                    detected_failures['Check Audio File'].append(f"{line}-{s}")
+                    detected_failures['Check Audio File'].append(format_location(line, s))
 
-        # Logic 4: Mic Cable
+        # Failure Mode 4: Mic Cable
         for s in stations:
             if st_stats[s]['cable_fail_count'] > 10:
-                detected_failures['Mic Cable Abnormal'].append(f"{line}-{s}")
+                detected_failures['Mic Cable Abnormal'].append(format_location(line, s))
 
 
     # --- 4. Dashboard Generation ---
@@ -162,19 +181,20 @@ def create_summary_dashboard(writer, df, date_str):
     current_row = 1
     
     # Styles
+    # White Borders as requested
     thin_border = Border(left=Side(style='thin', color='FFFFFF'), right=Side(style='thin', color='FFFFFF'), top=Side(style='thin', color='FFFFFF'), bottom=Side(style='thin', color='FFFFFF'))
     header_font = Font(bold=True)
     center_align = Alignment(horizontal='center', vertical='center')
     
     # Failure Board Styles
     fail_header_fill = PatternFill(start_color='FF6666', end_color='FF6666', fill_type='solid') # Red Header
-    fail_header_font = Font(bold=True, color='FFFFFF', size=14)
+    fail_header_font = Font(bold=True, color='000000', size=14)
     fail_row_fill = PatternFill(start_color='FFCCCC', end_color='FFCCCC', fill_type='solid') # Light Red
     fail_row_font = Font(bold=False, color='000000')
 
     # Line Dashboard Styles (Original)
     fill_g1_main = PatternFill(start_color='FFE699', end_color='FFE699', fill_type='solid') 
-    font_g1_main = Font(bold=True, color='FFFFFF')
+    font_g1_main = Font(bold=True, color='000000')
     fill_g1_sub = PatternFill(start_color='FFF2CC', end_color='FFF2CC', fill_type='solid') 
     font_sub_default = Font(bold=False, color='000000')
 
@@ -275,7 +295,7 @@ def create_summary_dashboard(writer, df, date_str):
         # Header: Line Name
         ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=len(stations)+2)
         cell = ws.cell(row=current_row, column=1, value=line)
-        cell.font = Font(bold=True, size=14, color='FFFFFF')
+        cell.font = Font(bold=True, size=14, color='000000')
         cell.fill = fill_g1_main
         cell.alignment = center_align
         current_row += 1
@@ -285,7 +305,7 @@ def create_summary_dashboard(writer, df, date_str):
         for i, h in enumerate(headers):
             c = ws.cell(row=current_row, column=i+1, value=h)
             c.font = Font(bold=True)
-            c.fill = PatternFill(start_color='DDDDDD', end_color='DDDDDD', fill_type='solid')
+            c.fill = PatternFill(start_color='FFE699', end_color='FFE699', fill_type='solid')
             c.border = thin_border
             c.alignment = center_align
         current_row += 1
@@ -432,9 +452,9 @@ def create_summary_dashboard(writer, df, date_str):
         current_row += 1 # Spacer
 
 def run_aggregation(target_date=None):
-    # ... (Keep existing run_aggregation logic) ...
-    # This part remains identical to previous working versions
-    # Just ensure to call create_summary_dashboard defined above
+    """
+    Aggregate distributed factory log files.
+    """
     if getattr(sys, 'frozen', False):
         base_dir = os.path.dirname(sys.executable)
     else:
