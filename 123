@@ -13,83 +13,73 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 def create_summary_dashboard(writer, df, date_str):
     """
-    Creates a 'Summary_Dashboard' sheet with rich formatting based on specific Failure Mode logic.
+    Creates a 'Summary_Dashboard' sheet with rich formatting based on Delta Electronics brand colors
+    and specific Grouping/Ranking logic, including Failure Mode Analysis.
     """
     workbook = writer.book
     sheet_name = 'Summary_Dashboard'
     
     # --- 1. Data Pre-processing & Logic Implementation ---
     
-    # A. Convert critical columns to Numeric to ensure '>' and '<' work correctly
-    # Coerce errors will turn non-numbers into NaN, then we fill with 0
-    numeric_cols = ['index1', 'index1_limit', 'index2', 'index2_limit', 'RPM', 'RPM_Low']
+    # A. Convert critical columns to Numeric
+    # Added 'dB(A)' for Failure Mode #5
+    numeric_cols = ['index1', 'index1_limit', 'index2', 'index2_limit', 'RPM', 'RPM_Low', 'dB(A)']
     for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
         else:
-            df[col] = 0 # Handle missing columns safely
+            df[col] = 0
 
-    # B. Define Basic Conditions (Boolean Masks)
-    # Note: str(x) is used to handle potential non-string data in text columns
-    
-    # Condition: Rotating (RPM != 0)
+    # B. Define Basic Conditions
     cond_rotating = (df['RPM'] != 0)
-    
-    # Condition: Index 1 Fail (Value > Limit)
-    cond_idx1_high = (df['index1'] > df['index1_limit'])
-    
-    # Condition: Index 2 Fail (Value > Limit)
-    cond_idx2_high = (df['index2'] > df['index2_limit'])
-    
-    # Condition: Out of control (User defined: RPM > RPM_Low)
-    cond_out_of_control = (df['RPM'] > df['RPM_Low'])
-    
-    # Condition: No rotate (RPM == 0)
+    cond_idx1_high = (df['index1'] > df['Index1_Limit'])
+    cond_idx2_high = (df['index2'] > df['Index2_Limit'])
+    cond_out_of_control = (df['RPM'] > df['RPM_Low']) + (df['RPM'] > 10000)
     cond_no_rotate = (df['RPM'] == 0)
-
-    # Condition: String searches
-    def check_keyword(row, keyword):
-        s1 = str(row.get('Intelligent_Control', '')).lower()
-        s2 = str(row.get('Section', '')).lower()
-        return keyword in s1 or keyword in s2
 
     # --- 2. Calculate Final Categories (0 or 1) ---
 
-    # 1. Total Fail (Total_Result != OK)
+    # 1. Total Fail
     df['is_fail'] = df['Total_Result'].apply(lambda x: 0 if str(x).strip().upper() == 'OK' else 1)
 
-    # 2. Noise (Search "noise")
-    df['calc_noise'] = df.apply(lambda row: 1 if check_keyword(row, 'noise') else 0, axis=1)
+    # 2. Noise Logic
+    df['calc_noise'] = (
+        ((cond_idx1_high) & (~cond_idx2_high) & (cond_rotating)).astype(int) +
+        ((cond_idx2_high) & (~cond_idx1_high) & (cond_rotating)).astype(int) +
+        ((cond_idx1_high) & (cond_idx2_high) & (cond_rotating)).astype(int) +
+        df.apply(lambda row: 1 if str(row.get('Intelligent_Control','')).strip().upper() == 'OK' 
+                 and str(row.get('Total_Result','')).strip().upper() != 'OK' else 0, axis=1)
+    )
 
-    # 3. Only Index1 Fail (Index1 > Limit AND Index2 <= Limit AND RPM != 0)
+    # 3. Only Index1 Fail
     df['calc_only_idx1'] = ((cond_idx1_high) & (~cond_idx2_high) & (cond_rotating)).astype(int)
 
-    # 4. Only Index2 Fail (Index2 > Limit AND Index1 <= Limit AND RPM != 0)
+    # 4. Only Index2 Fail
     df['calc_only_idx2'] = ((cond_idx2_high) & (~cond_idx1_high) & (cond_rotating)).astype(int)
 
-    # 5. Index 1 & 2 both Fail (Both > Limit AND RPM != 0)
+    # 5. Index 1 & 2 both Fail
     df['calc_both_idx'] = ((cond_idx1_high) & (cond_idx2_high) & (cond_rotating)).astype(int)
 
-    # 6. Spec Fail (Intelligent_Control == OK BUT Total_Result == NG)
-    # Note: Implicitly means indexes are within limits but result is NG
-    df['calc_spec_fail'] = df.apply(lambda row: 1 if str(row.get('Intelligent_Control','')).strip().upper() == 'OK' and str(row.get('Total_Result','')).strip().upper() != 'OK' else 0, axis=1)
+    # 6. Spec Fail
+    df['calc_spec_fail'] = df.apply(lambda row: 1 if str(row.get('Intelligent_Control','')).strip().upper() == 'OK' 
+                                    and str(row.get('Total_Result','')).strip().upper() != 'OK' else 0, axis=1)
 
-    # 7. Out of control (RPM > RPM_Low)
+    # 7. Out of control
     df['calc_out_control'] = cond_out_of_control.astype(int)
 
-    # 8. No rotate (RPM == 0)
+    # 8. No rotate
     df['calc_no_rotate'] = cond_no_rotate.astype(int)
 
-    # 9. RPM NG (Out of control OR No rotate)
+    # 9. RPM NG
     df['calc_rpm_ng'] = ((cond_out_of_control) | (cond_no_rotate)).astype(int)
 
-    # 10. PauseOrFreeRun (Model_Name contains "Pauseorfreerun")
+    # 10. PauseOrFreeRun
     df['calc_pause'] = df['Model_Name'].apply(lambda x: 1 if 'pauseorfreerun' in str(x).lower().replace(" ", "") else 0)
 
-    # 11. No Barcode (Barcode is empty/NaN)
+    # 11. No Barcode
     df['calc_no_barcode'] = df['Barcode'].apply(lambda x: 1 if pd.isna(x) or str(x).strip() == '' else 0)
 
-    # 12. Others (Pause + No Barcode)
+    # 12. Others
     df['calc_others'] = ((df['calc_pause'] == 1) | (df['calc_no_barcode'] == 1)).astype(int)
 
 
@@ -97,12 +87,42 @@ def create_summary_dashboard(writer, df, date_str):
     lines = sorted(df['Line_Name'].unique())
     current_row = 1
     
-    # Styles
-    gold_fill = PatternFill(start_color='FFD700', end_color='FFD700', fill_type='solid') # Yellow
-    blue_fill = PatternFill(start_color='ADD8E6', end_color='ADD8E6', fill_type='solid') # Blue
-    green_fill = PatternFill(start_color='90EE90', end_color='90EE90', fill_type='solid') # Green
-    white_fill = PatternFill(start_color='FFFFFF', end_color='FFFFFF', fill_type='solid')
-    thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+    # --- Define Styles ---
+    
+    # Group 1: Summary (Delta Blue)
+    fill_g1_main = PatternFill(start_color='FFE699', end_color='FFE699', fill_type='solid') 
+    font_g1_main = Font(bold=True, color='FFFFFF')
+    fill_g1_sub = PatternFill(start_color='FFF2CC', end_color='FFF2CC', fill_type='solid') 
+    font_sub_default = Font(bold=False, color='000000')
+
+    # Group 2: Noise (Cyan/Sky)
+    fill_g2_main = PatternFill(start_color='BDE7FF', end_color='BDE7FF', fill_type='solid')
+    font_g2_main = Font(bold=True, color='000000')
+    fill_g2_sub = PatternFill(start_color='D1EFFF', end_color='D1EFFF', fill_type='solid')
+
+    # Group 3: RPM (Delta Green)
+    fill_g3_main = PatternFill(start_color='A0E8E6', end_color='A0E8E6', fill_type='solid')
+    font_g3_main = Font(bold=True, color='000000')
+    fill_g3_sub = PatternFill(start_color='C6F1F0', end_color='C6F1F0', fill_type='solid')
+
+    # Group 4: Others (Neutral/Grey)
+    fill_g4_main = PatternFill(start_color='C9F084', end_color='C9F084', fill_type='solid')
+    font_g4_main = Font(bold=True, color='000000')
+    fill_g4_sub = PatternFill(start_color='E0F6B8', end_color='E0F6B8', fill_type='solid')
+    
+    # Group 5: Failure Mode (Warning Colors - Orange/Red)
+    fill_g5_main = PatternFill(start_color='FFB366', end_color='FFB366', fill_type='solid') # Strong Orange
+    font_g5_main = Font(bold=True, color='000000')
+    fill_g5_sub = PatternFill(start_color='FFF0E0', end_color='FFF0E0', fill_type='solid') # Very Light Orange
+    font_ng_red = Font(bold=True, color='FF0000') # Red text for NG
+
+    # Ranking Colors
+    rank_1_fill = PatternFill(start_color='FF5050', end_color='FF5050', fill_type='solid')
+    rank_2_fill = PatternFill(start_color='FF7C80', end_color='FF7C80', fill_type='solid')
+    rank_3_fill = PatternFill(start_color='FF9999', end_color='FF9999', fill_type='solid')
+    rank_4_fill = PatternFill(start_color='FFCCCC', end_color='FFCCCC', fill_type='solid')
+
+    thin_border = Border(left=Side(style='thin', color='FFFFFF'), right=Side(style='thin', color='FFFFFF'), top=Side(style='thin', color='FFFFFF'), bottom=Side(style='thin', color='FFFFFF'))
     header_font = Font(bold=True)
     center_align = Alignment(horizontal='center', vertical='center')
 
@@ -114,10 +134,110 @@ def create_summary_dashboard(writer, df, date_str):
         line_df = df[df['Line_Name'] == line]
         stations = sorted(line_df['Device_ID'].unique())
         
+        # --- Pre-calculate Statistics for Failure Modes ---
+        # We need a dictionary to store the status (NG/OK) for each metric for each station
+        # Structure: failure_results[metric_key][station_name] = True (if NG) / False
+        failure_results = {
+            'Carrier Abnormal': {},
+            'Test Pin Abnormal': {},
+            'Mic Position': {},
+            'Mic Cable': {},
+            'Iso Box': {},
+            'Check Audio': {}
+        }
+        
+        # Helper: Calculate Rates per station
+        st_stats = {}
+        for st in stations:
+            st_data = line_df[line_df['Device_ID'] == st]
+            total = len(st_data)
+            
+            rpm_fail_count = st_data['calc_rpm_ng'].sum()
+            other_fail_count = st_data['calc_others'].sum()
+            
+            rpm_rate = (rpm_fail_count / total) if total > 0 else 0
+            other_rate = (other_fail_count / total) if total > 0 else 0
+            
+            idx1_mean = st_data['index1'].mean() if total > 0 else 0
+            idx2_mean = st_data['index2'].mean() if total > 0 else 0
+            # Handle dB(A) column existence safely
+            dba_mean = st_data['dB(A)'].mean() if 'dB(A)' in st_data.columns and total > 0 else 0
+            
+            cable_fail_count = ((st_data['index1'] > 300) | (st_data['index2'] > 300)).sum()
+            
+            st_stats[st] = {
+                'rpm_rate': rpm_rate,
+                'other_rate': other_rate,
+                'idx1_mean': idx1_mean,
+                'idx2_mean': idx2_mean,
+                'dba_mean': dba_mean,
+                'cable_fail_count': cable_fail_count
+            }
+
+        # Logic 1: Carrier abnormal
+        # Def: ALL stations RPM Rate > 1.5% OR ALL stations Other Rate > 1.5%
+        all_rpm_high = all(st_stats[s]['rpm_rate'] > 0.015 for s in stations)
+        all_other_high = all(st_stats[s]['other_rate'] > 0.015 for s in stations)
+        is_carrier_abnormal = all_rpm_high or all_other_high
+        # If true, mark all stations (since it's a Line issue)
+        for s in stations:
+            failure_results['Carrier Abnormal'][s] = is_carrier_abnormal
+
+        # Logic 2: Test pin abnormal
+        # Def: Single station RPM Rate > 2% OR Single station Other Rate > 2%
+        for s in stations:
+            is_pin_abnormal = (st_stats[s]['rpm_rate'] > 0.02) or (st_stats[s]['other_rate'] > 0.02)
+            failure_results['Test Pin Abnormal'][s] = is_pin_abnormal
+
+        # Logic 3, 5, 6: Relative Comparisons
+        # These require at least 2 stations to compare
+        if len(stations) > 1:
+            for s in stations:
+                # Calculate "Other" stations stats
+                other_stations = [os for os in stations if os != s]
+                
+                # Logic 3: Mic position (Index < Other_Avg * 0.8)
+                # Need means of others
+                others_idx1_mean = sum(st_stats[os]['idx1_mean'] for os in other_stations) / len(other_stations)
+                others_idx2_mean = sum(st_stats[os]['idx2_mean'] for os in other_stations) / len(other_stations)
+                
+                is_mic_pos_fail = (st_stats[s]['idx1_mean'] < others_idx1_mean * 0.8) or \
+                                  (st_stats[s]['idx2_mean'] < others_idx2_mean * 0.8)
+                failure_results['Mic Position'][s] = is_mic_pos_fail
+
+                # Logic 5: Isolation box (dB(A) > Other_Avg * 1.1)
+                others_dba_mean = sum(st_stats[os]['dba_mean'] for os in other_stations) / len(other_stations)
+                
+                # Only check if mean > 0 to avoid false positives on empty data
+                is_iso_box_fail = False
+                if others_dba_mean > 0:
+                     is_iso_box_fail = (st_stats[s]['dba_mean'] > others_dba_mean * 1.1)
+                failure_results['Iso Box'][s] = is_iso_box_fail
+
+                # Logic 6: Check audio (Index > Other_Avg * 1.3)
+                is_audio_fail = (st_stats[s]['idx1_mean'] > others_idx1_mean * 1.3) or \
+                                (st_stats[s]['idx2_mean'] > others_idx2_mean * 1.3)
+                failure_results['Check Audio'][s] = is_audio_fail
+        else:
+            # Cannot compare if only 1 station
+            for s in stations:
+                failure_results['Mic Position'][s] = False
+                failure_results['Iso Box'][s] = False
+                failure_results['Check Audio'][s] = False
+
+        # Logic 4: Mic cable abnormal
+        # Def: (Index > 300) count > 10
+        for s in stations:
+            is_cable_fail = st_stats[s]['cable_fail_count'] > 10
+            failure_results['Mic Cable'][s] = is_cable_fail
+
+
+        # --- Header Generation ---
         # Header: Line Name
         ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=len(stations)+2)
         cell = ws.cell(row=current_row, column=1, value=line)
-        cell.font = Font(bold=True, size=14)
+        cell.font = Font(bold=True, size=14, color='FFFFFF')
+        cell.fill = fill_g1_main
         cell.alignment = center_align
         current_row += 1
 
@@ -125,77 +245,199 @@ def create_summary_dashboard(writer, df, date_str):
         headers = ['Metric', 'Total'] + stations
         for i, h in enumerate(headers):
             c = ws.cell(row=current_row, column=i+1, value=h)
-            c.font = header_font
+            c.font = Font(bold=True)
+            c.fill = PatternFill(start_color='DDDDDD', end_color='DDDDDD', fill_type='solid')
             c.border = thin_border
             c.alignment = center_align
         current_row += 1
 
-        # Metrics Definition (Label, Column_Name, Fill_Color, Is_Rate, Is_String)
-        # Order matches user request
+        # --- Metrics Configuration ---
         metrics_config = [
-            ('Total Count',         None,               gold_fill,  False, False),
-            ('Fail Count',          'is_fail',          gold_fill,  False, False),
-            ('Fail Rate',           'is_fail',          gold_fill,  True,  False),
-            ('Noise',               'calc_noise',       blue_fill,  False, False),
-            ('Only Index1 Fail',    'calc_only_idx1',   blue_fill,  False, False),
-            ('Only Index2 Fail',    'calc_only_idx2',   blue_fill,  False, False),
-            ('Index 1 & 2 both Fail','calc_both_idx',   blue_fill,  False, False),
-            ('Spec Fail',           'calc_spec_fail',   blue_fill,  False, False),
-            ('RPM NG',              'calc_rpm_ng',      green_fill, False, False),
-            ('Out of control',      'calc_out_control', green_fill, False, False),
-            ('No rotate',           'calc_no_rotate',   green_fill, False, False),
-            ('Others',              'calc_others',      green_fill, False, False),
-            ('PauseOrFreeRun',      'calc_pause',       green_fill, False, False),
-            ('No Barcode',          'calc_no_barcode',  green_fill, False, False),
-            ('Model Name',          'Model_Name',       white_fill, False, True),
+            # Group 1: Summary
+            ('Total Count',       None,               False, False, 1, False),
+            ('Fail Count',        'is_fail',          False, False, 1, False),
+            ('Fail Rate',         'is_fail',          True,  False, 1, False),
+            ('Noise Rate',        'calc_noise',       True,  False, 1, False),
+            ('RPM Fail Rate',     'calc_rpm_ng',      True,  False, 1, False),
+            ('Other Fail Rate',   'calc_others',      True,  False, 1, False),
+            
+            # Group 2: Noise Fail
+            ('Noise',             'calc_noise',       False, False, 2, True),
+            ('Only Index1 Fail',  'calc_only_idx1',   False, False, 2, False),
+            ('Only Index2 Fail',  'calc_only_idx2',   False, False, 2, False),
+            ('Index 1 & 2 both',  'calc_both_idx',    False, False, 2, False),
+            ('Spec Fail',         'calc_spec_fail',   False, False, 2, False),
+
+            # Group 3: RPM Fail
+            ('RPM NG',            'calc_rpm_ng',      False, False, 3, True),
+            ('Out of control',    'calc_out_control', False, False, 3, False),
+            ('No rotate',         'calc_no_rotate',   False, False, 3, False),
+
+            # Group 4: Others Fail
+            ('Others',            'calc_others',      False, False, 4, True),
+            ('PauseOrFreeRun',    'calc_pause',       False, False, 4, False),
+            ('No Barcode',        'calc_no_barcode',  False, False, 4, False),
+            ('Model Name',        'Model_Name',       False, True,  4, False),
+
+            # Group 5: Failure Mode Analysis (New)
+            # Using special key 'calc_failure_mode' to indicate looking up in failure_results
+            ('Carrier abnormal',      'Carrier Abnormal',  False, False, 5, True),
+            ('Test pin abnormal',     'Test Pin Abnormal', False, False, 5, False),
+            ('Please check mic position','Mic Position',    False, False, 5, False),
+            ('Mic cable abnormal',    'Mic Cable',         False, False, 5, False),
+            ('Isolation box abnormal','Iso Box',           False, False, 5, False),
+            ('Please check audio file','Check Audio',       False, False, 5, False),
         ]
 
-        for label, col, fill, is_rate, is_string in metrics_config:
-            # Metric Label
+        ranking_targets = ['Fail Count', 'Fail Rate', 'Noise Rate', 'RPM Fail Rate', 'Other Fail Rate']
+
+        for label, col, is_rate, is_string, group_id, is_main in metrics_config:
+            
+            # Determine Base Style
+            if group_id == 1:
+                base_fill = fill_g1_main if is_main else fill_g1_sub
+                base_font = font_g1_main if is_main else font_sub_default
+            elif group_id == 2:
+                base_fill = fill_g2_main if is_main else fill_g2_sub
+                base_font = font_g2_main if is_main else font_sub_default
+            elif group_id == 3:
+                base_fill = fill_g3_main if is_main else fill_g3_sub
+                base_font = font_g3_main if is_main else font_sub_default
+            elif group_id == 4:
+                base_fill = fill_g4_main if is_main else fill_g4_sub
+                base_font = font_g4_main if is_main else font_sub_default
+            else: # Group 5 Failure Mode
+                base_fill = fill_g5_main if is_main else fill_g5_sub
+                base_font = font_g5_main if is_main else font_sub_default
+
+            # Metric Label Cell
             c_label = ws.cell(row=current_row, column=1, value=label)
+            c_label.fill = base_fill
+            c_label.font = base_font
             c_label.border = thin_border
-            
-            # --- Total Column Logic ---
-            if is_string:
-                # For Model Name, show Unique values joined by comma
+
+            # --- Special Logic for Model Name Merge ---
+            if label == 'Model Name':
+                ws.merge_cells(start_row=current_row, start_column=2, end_row=current_row, end_column=2+len(stations))
+                
+                # Calculate value (Total)
                 val = ",".join(line_df[col].dropna().unique().astype(str))
-            elif label == 'Total Count':
-                val = len(line_df)
-            elif is_rate:
-                total = len(line_df)
-                fails = line_df[col].sum()
-                val = f"{(fails/total)*100:.2f}%" if total > 0 else "0.00%"
-            else:
-                # Normal Sum
-                val = line_df[col].sum()
+                c_total = ws.cell(row=current_row, column=2, value=val)
+                c_total.fill = base_fill
+                c_total.font = base_font
+                c_total.border = thin_border
+                c_total.alignment = center_align
+                
+                current_row += 1
+                continue
             
-            c_total = ws.cell(row=current_row, column=2, value=val)
-            c_total.fill = fill
+            # --- Calculation Logic ---
+            station_values = []
+            
+            # 1. Total Column Calculation
+            # For Failure Modes, Total column logic is: If ANY station is NG, Total is NG?
+            # Or for Carrier Abnormal (Line level), Total is NG.
+            total_val_display = ""
+            
+            if group_id == 5:
+                # Failure Mode Logic for Total Column
+                # Check if any station is True for this failure mode
+                any_fail = False
+                for s in stations:
+                    if failure_results[col].get(s, False):
+                        any_fail = True
+                        break
+                if any_fail:
+                    total_val_display = "NG"
+                else:
+                    total_val_display = "OK"
+            else:
+                # Standard Logic
+                if is_string:
+                    total_val_display = ",".join(line_df[col].dropna().unique().astype(str))
+                elif label == 'Total Count':
+                    total_val_display = len(line_df)
+                elif is_rate:
+                    total = len(line_df)
+                    fails = line_df[col].sum()
+                    total_val_display = f"{(fails/total)*100:.2f}%" if total > 0 else "0.00%"
+                else:
+                    total_val_display = line_df[col].sum()
+            
+            # Write Total Cell
+            c_total = ws.cell(row=current_row, column=2, value=total_val_display)
+            c_total.fill = base_fill
+            c_total.font = font_ng_red if total_val_display == "NG" else base_font
             c_total.border = thin_border
             c_total.alignment = center_align
 
-            # --- Station Columns Logic ---
+            # 2. Station Columns Calculation
             for i, station in enumerate(stations):
-                st_df = line_df[line_df['Device_ID'] == station]
-                
-                if is_string:
-                    # Take the first non-empty Model Name found for this station
-                    unique_names = st_df[col].dropna().unique()
-                    st_val = str(unique_names[0]) if len(unique_names) > 0 else ""
-                elif label == 'Total Count':
-                    st_val = len(st_df)
-                elif is_rate:
-                    total = len(st_df)
-                    fails = st_df[col].sum()
-                    st_val = f"{(fails/total)*100:.2f}%" if total > 0 else "0.00%"
+                st_val_display = ""
+                raw_num_val = 0
+
+                if group_id == 5:
+                    # Failure Mode Look up
+                    is_ng = failure_results[col].get(station, False)
+                    st_val_display = "NG" if is_ng else "OK"
                 else:
-                    st_val = st_df[col].sum()
+                    # Standard Logic
+                    st_df = line_df[line_df['Device_ID'] == station]
+                    
+                    if is_string:
+                        unique_names = st_df[col].dropna().unique()
+                        st_val_display = str(unique_names[0]) if len(unique_names) > 0 else ""
+                    elif label == 'Total Count':
+                        raw_num_val = len(st_df)
+                        st_val_display = raw_num_val
+                    elif is_rate:
+                        total = len(st_df)
+                        fails = st_df[col].sum()
+                        raw_num_val = (fails/total) if total > 0 else 0
+                        st_val_display = f"{raw_num_val*100:.2f}%"
+                    else:
+                        raw_num_val = st_df[col].sum()
+                        st_val_display = raw_num_val
                 
-                c_st = ws.cell(row=current_row, column=i+3, value=st_val)
-                c_st.fill = fill
+                # Write Station Cell
+                c_st = ws.cell(row=current_row, column=i+3, value=st_val_display)
+                c_st.fill = base_fill 
+                
+                # Special Font for NG in Failure Modes
+                if group_id == 5:
+                    c_st.font = font_ng_red if st_val_display == "NG" else base_font
+                else:
+                    c_st.font = base_font
+                    
                 c_st.border = thin_border
                 c_st.alignment = center_align
-            
+                
+                # Collect for Ranking (Only for Standard metrics)
+                if group_id != 5:
+                    station_values.append({'col_idx': i+3, 'val': raw_num_val, 'cell': c_st})
+
+            # --- Apply Ranking Logic (Only for specified targets) ---
+            if label in ranking_targets:
+                unique_vals = sorted(list(set([x['val'] for x in station_values])), reverse=True)
+                
+                val_1st = unique_vals[0] if len(unique_vals) > 0 else None
+                val_2nd = unique_vals[1] if len(unique_vals) > 1 else None
+                val_3rd = unique_vals[2] if len(unique_vals) > 2 else None
+                val_4rd = unique_vals[3] if len(unique_vals) > 3 else None
+
+                for item in station_values:
+                    if item['val'] == 0:
+                        continue
+                        
+                    if item['val'] == val_1st:
+                        item['cell'].fill = rank_1_fill 
+                    elif item['val'] == val_2nd:
+                        item['cell'].fill = rank_2_fill 
+                    elif item['val'] == val_3rd:
+                        item['cell'].fill = rank_3_fill 
+                    elif item['val'] == val_4rd:
+                        item['cell'].fill = rank_4_fill
+
             current_row += 1
         
         current_row += 1 # Spacer
@@ -279,6 +521,11 @@ def run_aggregation(target_date=None):
             # Header Cleaning (Trim whitespace)
             df.columns = df.columns.str.strip()
             
+            # Fix Typo
+            if 'Toral_Result' in df.columns:
+                df.rename(columns={'Toral_Result':'Total_Result'}, inplace=True)
+                logging.info(f"Fixed typo 'Toral_Result' in {filename}")
+
             # Check essential column
             if 'Total_Result' not in df.columns:
                 logging.warning(f"Skipping {filename}: Missing 'Total_Result'")
