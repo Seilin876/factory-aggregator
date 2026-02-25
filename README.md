@@ -1,43 +1,40 @@
-# Factory Data Aggregator
+Markdown
 
-自動化合併分散式產線日誌（.txt）至單一彙總報表（.csv）。
+# Factory Log Aggregator & Dashboard Generator
 
----
+[![Python Version](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## 🚀 使用步驟
+## 專案概述 (Project Overview)
+本專案為一套專為工業生產環境設計的自動化數據彙整工具 (Automated Data Aggregation Tool)。旨在解決工廠端原始日誌 (Raw Logs) 格式破碎、跨設備數據孤島 (Data Silos) 之問題。透過高效能的數據處理管線 (Data Pipeline)，將分散的 Log 檔案自動彙整為具備視覺化指標的 Excel 儀表板 (Executive Dashboard)。
 
+## 核心功能 (Core Features)
+* **多源數據彙整 (Multi-source Aggregation)**：自動遍歷指定目錄，解析不同設備產出的異質 Log 格式。
+* **數據清洗與標準化 (ETL Process)**：執行去重 (Deduplication)、缺失值處理及格式標準化作業。
+* **自動化儀表板 (Automated Dashboarding)**：利用 `pandas` 與 `XlsxWriter` 引擎，生成內含樞紐分析與統計圖表之 Excel 報表。
+* **二級思考架構 (Second-Order Thinking Implementation)**：預留錯誤捕捉機制，確保在 Log 格式突發性變動時仍能維持系統穩定性 (System Robustness)。
 
-### 1. 環境準備
-此腳本依賴 `pandas` 處理大量數據。請先安裝必要套件：
+## 技術棧 (Technology Stack)
+* **Language**: Python 3.x
+* **Core Libraries**: 
+    * `pandas`: 用於大規模數據操縱與分析 (Data Manipulation)。
+    * `openpyxl` / `XlsxWriter`: 驅動 Excel 檔案生成的進階引擎。
+    * `os` / `glob`: 執行系統層級的檔案檢索與路徑管理。
+
+## 快速開始 (Quick Start)
+
+### 1. 環境配置 (Environment Setup)
 ```bash
-pip install pandas
-```
+pip install pandas openpyxl xlsxwriter
+2. 執行腳本 (Execution)
+將 Log 檔案放置於專案預設的 /raw_data 目錄下，執行：
 
-### 2. 準備測試資料
-腳本會尋找符合 `{Date}_{IP}.txt` 格式的檔案。Dry run的話可以手動建立測試檔：
-```bash
-mkdir -p data_source
-echo "col1,col2\n1,2\n3,4" > data_source/20260209_10_184_137_46.txt
-```
+Bash
 
-### 3. 修改設定檔
-編輯 `config.ini`，將來源路徑指向剛才建立的測試目錄：
-```ini
-[Path]
-Source_Folder = ./data_source
-Output_Folder = ./Output_Summaries
-```
-
-### 4. 執行腳本
-執行主程式（預設處理前一天的數據）：
-```bash
 python aggregator.py
-```
-執行完成後，檢查 `./Output_Summaries/` 目錄是否生成了合併後的 `.csv` 檔案。
+風險審計與限制 (Risk Audit & Constraints)
+性能瓶頸 (Performance Bottleneck)：當 Log 數據量超過百萬等級 (Million-scale) 時，pandas 的記憶體消耗將呈線性增長，建議改採分塊讀取 (Chunking) 策略。
 
----
+Schema 飄移 (Schema Drift)：若工廠端韌體更新導致 Log 欄位變更，腳本將拋出關鍵字錯誤 (KeyError)，需手動調整 config.json 中的對應表。
 
-## 🛠 技術規格
-- **輸入**: `\\10.198.112.103\Noise_Data` 中的日誌檔案。
-- **輸出**: 每日彙總 CSV。
-- **映射邏輯**: 透過 `config.ini` 中的 `[Device_Mapping]` 區塊自動為數據注入產線與設備名稱。
+安全合規 (Compliance)：本腳本僅處理本地數據，不涉及雲端上傳，符合一般工廠對資安 (Information Security) 的內網物理隔離要求。
