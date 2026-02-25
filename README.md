@@ -6,7 +6,6 @@
 
 ## 🚀 Dry Run 測試步驟
 
-在明天上傳原始資料前，您可以先在您的 Mac Mini 環境中進行 Dry Run 測試：
 
 ### 1. 環境準備
 此腳本依賴 `pandas` 處理大量數據。請先安裝必要套件：
@@ -15,7 +14,7 @@ pip install pandas
 ```
 
 ### 2. 準備測試資料
-腳本會尋找符合 `{Date}_{IP}.txt` 格式的檔案。您可以手動建立一個測試檔：
+腳本會尋找符合 `{Date}_{IP}.txt` 格式的檔案。Dry run的話可以手動建立測試檔：
 ```bash
 mkdir -p data_source
 echo "col1,col2\n1,2\n3,4" > data_source/20260209_10_184_137_46.txt
@@ -30,7 +29,7 @@ Output_Folder = ./Output_Summaries
 ```
 
 ### 4. 執行腳本
-執行主程式（預設處理昨天的數據）：
+執行主程式（預設處理前一天的數據）：
 ```bash
 python aggregator.py
 ```
