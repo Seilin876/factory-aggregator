@@ -9,51 +9,61 @@ import glob
 import re
 from openpyxl.styles import PatternFill, Border, Side, Alignment, Font
 
-# Initialize logging
+# 初始化日誌記錄
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def create_summary_dashboard(writer, df, date_str):
     """
-    Creates a 'Summary_Dashboard' sheet.
-    Top Section: Failure Mode Analysis Summary (Global List).
-    Bottom Section: Detailed per-line dashboard (Original Format).
+    建立 'Summary_Dashboard' 分頁。
+    上半部：異常模式分析總表 (全局清單)。
+    下半部：各線別詳細報表 (原始格式)。
     """
     workbook = writer.book
     sheet_name = 'Summary_Dashboard'
     
-    # --- 1. Data Pre-processing ---
+    # --- 1. 資料預處理 ---
     
-    # A. Convert critical columns to Numeric
-    # Added 'dB(A)' for Failure Mode #5
-    numeric_cols = ['index1', 'index1_limit', 'index2', 'index2_limit', 'RPM', 'RPM_Low', 'dB(A)']
+    # A. 將關鍵欄位轉換為數值型態
+    # 加入 'dB(A)' 供異常模式判斷使用，並新增 index3 及 RPM_Up
+    numeric_cols = [
+        'index1', 'Index1_Limit', 
+        'index2', 'Index2_Limit', 
+        'index3', 'Index3_Limit', 
+        'RPM', 'RPM_Low', 'RPM_Up', 'dB(A)'
+    ]
     for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
         else:
             df[col] = 0
 
-    # B. Define Basic Conditions
+    # B. 定義基本判斷條件
     cond_rotating = (df['RPM'] != 0)
     cond_idx1_high = (df['index1'] > df['Index1_Limit'])
     cond_idx2_high = (df['index2'] > df['Index2_Limit'])
-    cond_out_of_control = (df['RPM'] > df['RPM_Up']) + (df['RPM'] > 10000)
+    cond_idx3_high = (df['index3'] > df['Index3_Limit'])
+    cond_out_of_control = (df['RPM'] > df['RPM_Up']) | (df['RPM'] > 10000)
     cond_no_rotate = (df['RPM'] == 0)
 
-    # --- 2. Calculate Final Categories ---
+    # --- 2. 詳細項目計數邏輯 ---
 
     df['is_fail'] = df['Total_Result'].apply(lambda x: 0 if str(x).strip().upper() == 'OK' else 1)
 
+    # 綜合 Noise 判定 (任一 Index 超標且轉動中，或是系統判定 Fail 但控制板顯示 OK)
     df['calc_noise'] = (
-        ((cond_idx1_high) & (~cond_idx2_high) & (cond_rotating)).astype(int) +
-        ((cond_idx2_high) & (~cond_idx1_high) & (cond_rotating)).astype(int) +
-        ((cond_idx1_high) & (cond_idx2_high) & (cond_rotating)).astype(int) +
+        ((cond_idx1_high | cond_idx2_high | cond_idx3_high) & cond_rotating).astype(int) +
         df.apply(lambda row: 1 if str(row.get('Intelligent_Control','')).strip().upper() == 'OK' 
                  and str(row.get('Total_Result','')).strip().upper() != 'OK' else 0, axis=1)
     )
 
-    df['calc_only_idx1'] = ((cond_idx1_high) & (~cond_idx2_high) & (cond_rotating)).astype(int)
-    df['calc_only_idx2'] = ((cond_idx2_high) & (~cond_idx1_high) & (cond_rotating)).astype(int)
-    df['calc_both_idx'] = ((cond_idx1_high) & (cond_idx2_high) & (cond_rotating)).astype(int)
+    # 各項 Index 獨立 Fail 判定
+    df['calc_only_idx1'] = (cond_idx1_high & ~cond_idx2_high & ~cond_idx3_high & cond_rotating).astype(int)
+    df['calc_only_idx2'] = (~cond_idx1_high & cond_idx2_high & ~cond_idx3_high & cond_rotating).astype(int)
+    df['calc_only_idx3'] = (~cond_idx1_high & ~cond_idx2_high & cond_idx3_high & cond_rotating).astype(int)
+    
+    # 兩項(含)以上 Index 異常判定
+    df['calc_multi_idx'] = (((cond_idx1_high.astype(int) + cond_idx2_high.astype(int) + cond_idx3_high.astype(int)) >= 2) & cond_rotating).astype(int)
+    
     df['calc_spec_fail'] = df.apply(lambda row: 1 if str(row.get('Intelligent_Control','')).strip().upper() == 'OK' 
                                     and str(row.get('Total_Result','')).strip().upper() != 'OK' else 0, axis=1)
     
@@ -66,27 +76,27 @@ def create_summary_dashboard(writer, df, date_str):
     df['calc_others'] = ((df['calc_pause'] == 1) | (df['calc_no_barcode'] == 1)).astype(int)
 
 
-    # --- 3. Logic Analysis Phase (Pre-calculation for Summary Board) ---
+    # --- 3. 邏輯分析階段 (預先計算總表所需數據) ---
     
     lines = sorted(df['Line_Name'].unique())
     
-    # Dictionary to store detected locations for each mode
+    # 使用字典儲存各模式偵測到的異常位置
     detected_failures = {
         'Carrier Abnormal': [],
         'Test Pin Abnormal': [],
         'Mic Position Variant': [],
         'Mic Cable Abnormal': [],
         'Isolation Box Abnormal': [],
-        'Check Audio File': []
+        'Need to Check Audio File': []
     }
 
-    # Helper function for CXX-NoX format
+    # 輔助函式：將 Line_13 轉換為 C13，Station_1 轉換為 No1
     def format_location(line_str, station_str=None):
-        # 1. Process Line (Line_13 -> C13)
+        # 1. 處理線別名稱
         l_nums = re.findall(r'\d+', str(line_str))
         l_code = f"C{int(l_nums[0]):02d}" if l_nums else str(line_str)
         
-        # 2. Process Station (Station_1 -> No1)
+        # 2. 處理站點名稱
         if station_str:
             s_nums = re.findall(r'\d+', str(station_str))
             s_code = f"No{int(s_nums[0])}" if s_nums else str(station_str)
@@ -98,7 +108,7 @@ def create_summary_dashboard(writer, df, date_str):
         line_df = df[df['Line_Name'] == line]
         stations = sorted(line_df['Device_ID'].unique())
         
-        # Helper: Calculate stats for this line
+        # 輔助計算：統計該線別各站點的數據
         st_stats = {}
         for st in stations:
             st_data = line_df[line_df['Device_ID'] == st]
@@ -112,21 +122,23 @@ def create_summary_dashboard(writer, df, date_str):
             
             idx1_mean = st_data['index1'].mean() if total > 0 else 0
             idx2_mean = st_data['index2'].mean() if total > 0 else 0
+            idx3_mean = st_data['index3'].mean() if total > 0 else 0
             dba_mean = st_data['dB(A)'].mean() if 'dB(A)' in st_data.columns and total > 0 else 0
             
-            cable_fail_count = ((st_data['index1'] > 300) | (st_data['index2'] > 300)).sum()
+            cable_fail_count = ((st_data['index1'] > 300) | (st_data['index2'] > 300) | (st_data['index3'] > 300)).sum()
             
             st_stats[st] = {
                 'rpm_rate': rpm_rate,
                 'other_rate': other_rate,
                 'idx1_mean': idx1_mean,
                 'idx2_mean': idx2_mean,
+                'idx3_mean': idx3_mean,
                 'dba_mean': dba_mean,
                 'cable_fail_count': cable_fail_count
             }
 
-        # Failure Mode 1: Carrier Abnormal (Line Level)
-        # Condition: (All > 1% AND Spread <= 3%)
+        # 異常模式 1：載具異常 (線別層級)
+        # 條件：各站點大於 1% 且數值接近 (最大差距 <= 3%)
         if stations:
             rpm_rates = [st_stats[s]['rpm_rate'] for s in stations]
             other_rates = [st_stats[s]['other_rate'] for s in stations]
@@ -141,59 +153,64 @@ def create_summary_dashboard(writer, df, date_str):
                 short_code = format_location(line)
                 detected_failures['Carrier Abnormal'].append(f"{short_code}-All")
 
-        # Failure Mode 2: Test Pin Abnormal (Station Level)
+        # 異常模式 2：探針異常 (站點層級)
         for s in stations:
             if (st_stats[s]['rpm_rate'] > 0.02) or (st_stats[s]['other_rate'] > 0.02):
                 detected_failures['Test Pin Abnormal'].append(format_location(line, s))
 
-        # Failure Mode 3, 5, 6: Relative Comparison
+        # 異常模式 3, 5, 6：相對比較 (需有多個站點)
         if len(stations) > 1:
             for s in stations:
                 other_stations = [os for os in stations if os != s]
                 
-                # Logic 3: Mic Position
+                # 計算其他站點平均值
                 others_idx1_mean = sum(st_stats[os]['idx1_mean'] for os in other_stations) / len(other_stations)
                 others_idx2_mean = sum(st_stats[os]['idx2_mean'] for os in other_stations) / len(other_stations)
+                others_idx3_mean = sum(st_stats[os]['idx3_mean'] for os in other_stations) / len(other_stations)
                 
-                if (st_stats[s]['idx1_mean'] < others_idx1_mean * 0.8) or (st_stats[s]['idx2_mean'] < others_idx2_mean * 0.8):
+                # 邏輯 3：麥克風位置變異
+                if (st_stats[s]['idx1_mean'] < others_idx1_mean * 0.8) or \
+                   (st_stats[s]['idx2_mean'] < others_idx2_mean * 0.8) or \
+                   (st_stats[s]['idx3_mean'] < others_idx3_mean * 0.8):
                     detected_failures['Mic Position Variant'].append(format_location(line, s))
 
-                # Logic 5: Isolation Box
+                # 邏輯 5：隔音箱異常
                 others_dba_mean = sum(st_stats[os]['dba_mean'] for os in other_stations) / len(other_stations)
                 if others_dba_mean > 0:
                     if st_stats[s]['dba_mean'] > others_dba_mean * 1.1:
                          detected_failures['Isolation Box Abnormal'].append(format_location(line, s))
 
-                # Logic 6: Check Audio
-                if (st_stats[s]['idx1_mean'] > others_idx1_mean * 1.3) or (st_stats[s]['idx2_mean'] > others_idx2_mean * 1.3):
-                    detected_failures['Check Audio File'].append(format_location(line, s))
+                # 邏輯 6：需確認音頻
+                if (st_stats[s]['idx1_mean'] > others_idx1_mean * 1.3) or \
+                   (st_stats[s]['idx2_mean'] > others_idx2_mean * 1.3) or \
+                   (st_stats[s]['idx3_mean'] > others_idx3_mean * 1.3):
+                    detected_failures['Need to Check Audio File'].append(format_location(line, s))
 
-        # Failure Mode 4: Mic Cable
+        # 異常模式 4：線材異常
         for s in stations:
             if st_stats[s]['cable_fail_count'] > 10:
                 detected_failures['Mic Cable Abnormal'].append(format_location(line, s))
 
 
-    # --- 4. Dashboard Generation ---
+    # --- 4. 產生報表 (Dashboard Generation) ---
     if sheet_name not in workbook.sheetnames:
         workbook.create_sheet(sheet_name)
     ws = workbook[sheet_name]
 
     current_row = 1
     
-    # Styles
-    # White Borders as requested
+    # 設定儲存格樣式
     thin_border = Border(left=Side(style='thin', color='FFFFFF'), right=Side(style='thin', color='FFFFFF'), top=Side(style='thin', color='FFFFFF'), bottom=Side(style='thin', color='FFFFFF'))
     header_font = Font(bold=True)
     center_align = Alignment(horizontal='center', vertical='center')
     
-    # Failure Board Styles
-    fail_header_fill = PatternFill(start_color='FF6666', end_color='FF6666', fill_type='solid') # Red Header
+    # 總表 (Summary Board) 樣式
+    fail_header_fill = PatternFill(start_color='FF6666', end_color='FF6666', fill_type='solid') 
     fail_header_font = Font(bold=True, color='000000', size=14)
-    fail_row_fill = PatternFill(start_color='FFCCCC', end_color='FFCCCC', fill_type='solid') # Light Red
+    fail_row_fill = PatternFill(start_color='FFCCCC', end_color='FFCCCC', fill_type='solid') 
     fail_row_font = Font(bold=False, color='000000')
 
-    # Line Dashboard Styles (Original)
+    # 各線別詳細報表樣式
     fill_g1_main = PatternFill(start_color='FFE699', end_color='FFE699', fill_type='solid') 
     font_g1_main = Font(bold=True, color='000000')
     fill_g1_sub = PatternFill(start_color='FFF2CC', end_color='FFF2CC', fill_type='solid') 
@@ -211,6 +228,7 @@ def create_summary_dashboard(writer, df, date_str):
     font_g4_main = Font(bold=True, color='000000')
     fill_g4_sub = PatternFill(start_color='E0F6B8', end_color='E0F6B8', fill_type='solid')
 
+    # 排行榜顏色
     rank_1_fill = PatternFill(start_color='FF5050', end_color='FF5050', fill_type='solid')
     rank_2_fill = PatternFill(start_color='FF9999', end_color='FF9999', fill_type='solid')
     rank_3_fill = PatternFill(start_color='FFCCCC', end_color='FFCCCC', fill_type='solid')
@@ -218,10 +236,10 @@ def create_summary_dashboard(writer, df, date_str):
 
 
     # ==========================================
-    # PART A: WRITE FAILURE MODE SUMMARY BOARD
+    # 第一部分：寫入異常模式總表
     # ==========================================
     
-    # 1. Title
+    # 1. 寫入標題
     ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=3)
     title_cell = ws.cell(row=current_row, column=1, value=f"Daily Failure Mode Analysis ({date_str})")
     title_cell.font = fail_header_font
@@ -229,50 +247,51 @@ def create_summary_dashboard(writer, df, date_str):
     title_cell.alignment = center_align
     current_row += 1
 
-    # 2. Headers
+    # 2. 寫入欄位標題
     ws.cell(row=current_row, column=1, value="No.").font = Font(bold=True)
     ws.cell(row=current_row, column=2, value="Failure Mode").font = Font(bold=True)
     ws.cell(row=current_row, column=3, value="Detected Locations (Line - Station)").font = Font(bold=True)
     
     for col in range(1, 4):
         c = ws.cell(row=current_row, column=col)
-        c.fill = PatternFill(start_color='E0E0E0', end_color='E0E0E0', fill_type='solid') # Grey
+        c.fill = PatternFill(start_color='E0E0E0', end_color='E0E0E0', fill_type='solid') 
         c.border = thin_border
         c.alignment = center_align
     current_row += 1
 
-    # 3. List the 6 Modes
+    # 3. 依序列出 6 種異常模式
     modes_order = [
         'Carrier Abnormal', 
         'Test Pin Abnormal', 
         'Mic Position Variant', 
         'Mic Cable Abnormal', 
         'Isolation Box Abnormal', 
-        'Check Audio File'
+        'Need to Check Audio File'
     ]
 
     for idx, mode in enumerate(modes_order, 1):
-        # Index
+        # 序號
         c1 = ws.cell(row=current_row, column=1, value=idx)
         c1.fill = fail_row_fill
         c1.border = thin_border
         c1.alignment = center_align
 
-        # Mode Name
+        # 模式名稱
         c2 = ws.cell(row=current_row, column=2, value=mode)
         c2.fill = fail_row_fill
         c2.border = thin_border
         c2.alignment = Alignment(horizontal='left', vertical='center')
 
-        # Results
+        # 偵測結果
         locations = detected_failures.get(mode, [])
         if locations:
             res_str = ", ".join(locations)
-            # Highlight text in Red if issues found
+            # 若有發現異常，字體顯示紅色
             font_res = Font(color='FF0000', bold=True)
         else:
             res_str = "OK"
-            font_res = Font(color='008000', bold=True) # Green for OK
+            # 正常則顯示綠色
+            font_res = Font(color='008000', bold=True)
 
         c3 = ws.cell(row=current_row, column=3, value=res_str)
         c3.fill = fail_row_fill
@@ -282,18 +301,19 @@ def create_summary_dashboard(writer, df, date_str):
 
         current_row += 1
 
-    current_row += 2 # Add Spacer between Summary Board and Detailed Report
+    # 總表與詳細報表之間加入空白行
+    current_row += 2 
 
 
     # ==========================================
-    # PART B: WRITE DETAILED PER-LINE DASHBOARD
+    # 第二部分：寫入各線別詳細報表
     # ==========================================
     
     for line in lines:
         line_df = df[df['Line_Name'] == line]
         stations = sorted(line_df['Device_ID'].unique())
         
-        # Header: Line Name
+        # 標題：線別名稱
         ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=len(stations)+2)
         cell = ws.cell(row=current_row, column=1, value=line)
         cell.font = Font(bold=True, size=14, color='000000')
@@ -301,7 +321,7 @@ def create_summary_dashboard(writer, df, date_str):
         cell.alignment = center_align
         current_row += 1
 
-        # Column Headers
+        # 欄位標題
         headers = ['Metric', 'Total'] + stations
         for i, h in enumerate(headers):
             c = ws.cell(row=current_row, column=i+1, value=h)
@@ -311,9 +331,9 @@ def create_summary_dashboard(writer, df, date_str):
             c.alignment = center_align
         current_row += 1
 
-        # Metrics Configuration (Original Group 1-4)
+        # 指標配置
         metrics_config = [
-            # Group 1: Summary
+            # Group 1
             ('Total Count',       None,               False, False, 1, False),
             ('Fail Count',        'is_fail',          False, False, 1, False),
             ('Fail Rate',         'is_fail',          True,  False, 1, False),
@@ -321,19 +341,20 @@ def create_summary_dashboard(writer, df, date_str):
             ('RPM Fail Rate',     'calc_rpm_ng',      True,  False, 1, False),
             ('Other Fail Rate',   'calc_others',      True,  False, 1, False),
             
-            # Group 2: Noise Fail
+            # Group 2
             ('Noise',             'calc_noise',       False, False, 2, True),
             ('Only Index1 Fail',  'calc_only_idx1',   False, False, 2, False),
             ('Only Index2 Fail',  'calc_only_idx2',   False, False, 2, False),
-            ('Index 1 & 2 both',  'calc_both_idx',    False, False, 2, False),
+            ('Only Index3 Fail',  'calc_only_idx3',   False, False, 2, False),
+            ('Multiple Index Fail','calc_multi_idx',  False, False, 2, False),
             ('Spec Fail',         'calc_spec_fail',   False, False, 2, False),
 
-            # Group 3: RPM Fail
+            # Group 3
             ('RPM NG',            'calc_rpm_ng',      False, False, 3, True),
             ('Out of control',    'calc_out_control', False, False, 3, False),
             ('No rotate',         'calc_no_rotate',   False, False, 3, False),
 
-            # Group 4: Others Fail
+            # Group 4
             ('Others',            'calc_others',      False, False, 4, True),
             ('PauseOrFreeRun',    'calc_pause',       False, False, 4, False),
             ('No Barcode',        'calc_no_barcode',  False, False, 4, False),
@@ -344,7 +365,7 @@ def create_summary_dashboard(writer, df, date_str):
 
         for label, col, is_rate, is_string, group_id, is_main in metrics_config:
             
-            # Determine Base Style
+            # 判斷所屬 Group 並套用對應底色
             if group_id == 1:
                 base_fill = fill_g1_main if is_main else fill_g1_sub
                 base_font = font_g1_main if is_main else font_sub_default
@@ -358,17 +379,20 @@ def create_summary_dashboard(writer, df, date_str):
                 base_fill = fill_g4_main if is_main else fill_g4_sub
                 base_font = font_g4_main if is_main else font_sub_default
 
-            # Metric Label Cell
+            # 寫入指標名稱
             c_label = ws.cell(row=current_row, column=1, value=label)
             c_label.fill = base_fill
             c_label.font = base_font
             c_label.border = thin_border
 
-            # Special Logic for Model Name Merge
+            # 針對 "Model Name" 的特殊合併儲存格邏輯，並隱藏 pauseorfreerun
             if label == 'Model Name':
                 ws.merge_cells(start_row=current_row, start_column=2, end_row=current_row, end_column=2+len(stations))
                 
-                val = ",".join(line_df[col].dropna().unique().astype(str))
+                unique_names = line_df[col].dropna().unique()
+                valid_names = [str(n) for n in unique_names if 'pauseorfreerun' not in str(n).lower().replace(" ", "")]
+                val = ",".join(valid_names)
+                
                 c_total = ws.cell(row=current_row, column=2, value=val)
                 c_total.fill = base_fill
                 c_total.font = base_font
@@ -378,12 +402,14 @@ def create_summary_dashboard(writer, df, date_str):
                 current_row += 1
                 continue
             
-            # Calculation
+            # 計算數據
             station_values = []
             
-            # Total Column
+            # Total 欄位計算
             if is_string:
-                val = ",".join(line_df[col].dropna().unique().astype(str))
+                unique_names = line_df[col].dropna().unique()
+                valid_names = [str(n) for n in unique_names if 'pauseorfreerun' not in str(n).lower().replace(" ", "")]
+                val = ",".join(valid_names)
             elif label == 'Total Count':
                 val = len(line_df)
             elif is_rate:
@@ -399,14 +425,15 @@ def create_summary_dashboard(writer, df, date_str):
             c_total.border = thin_border
             c_total.alignment = center_align
 
-            # Station Columns
+            # 各 Station 欄位計算
             for i, station in enumerate(stations):
                 st_df = line_df[line_df['Device_ID'] == station]
                 
                 raw_num_val = 0
                 if is_string:
                     unique_names = st_df[col].dropna().unique()
-                    st_val = str(unique_names[0]) if len(unique_names) > 0 else ""
+                    valid_names = [str(n) for n in unique_names if 'pauseorfreerun' not in str(n).lower().replace(" ", "")]
+                    st_val = valid_names[0] if len(valid_names) > 0 else ""
                 elif label == 'Total Count':
                     raw_num_val = len(st_df)
                     st_val = raw_num_val
@@ -427,7 +454,7 @@ def create_summary_dashboard(writer, df, date_str):
                 
                 station_values.append({'col_idx': i+3, 'val': raw_num_val, 'cell': c_st})
 
-            # Ranking Logic
+            # 排名上色邏輯
             if label in ranking_targets:
                 unique_vals = sorted(list(set([x['val'] for x in station_values])), reverse=True)
                 
@@ -450,11 +477,11 @@ def create_summary_dashboard(writer, df, date_str):
 
             current_row += 1
         
-        current_row += 1 # Spacer
+        current_row += 1 # 各線別之間的空白行
 
 def run_aggregation(target_date=None):
     """
-    Aggregate distributed factory log files.
+    整合各機台產出的測試日誌檔並生成報表。
     """
     if getattr(sys, 'frozen', False):
         base_dir = os.path.dirname(sys.executable)
@@ -464,7 +491,7 @@ def run_aggregation(target_date=None):
     config_path = os.path.join(base_dir, 'config.ini')
 
     if not os.path.exists(config_path):
-        logging.error(f"Config file NOT found at: {config_path}")
+        logging.error(f"找不到 Config 檔案路徑: {config_path}")
         return
 
     config = configparser.ConfigParser()
@@ -478,7 +505,7 @@ def run_aggregation(target_date=None):
         else:
             output_dir = output_base
     except KeyError as e:
-        logging.error(f"Config file missing key: {e}")
+        logging.error(f"Config 檔案缺少鍵值: {e}")
         return
     
     if not os.path.exists(output_dir):
@@ -488,22 +515,24 @@ def run_aggregation(target_date=None):
         from datetime import timedelta
         target_date = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
     
-    logging.info(f"Starting aggregation for date: {target_date}")
+    logging.info(f"開始整合日期: {target_date} 之資料")
 
     device_map = {}
     if 'Device_Mapping' in config:
         for ip, mapping in config['Device_Mapping'].items():
             try:
                 line, station = mapping.split(',')
-                device_map[ip.replace('.', '_')] = {'Line': line.strip(), 'Station': station.strip()}
+                # 將 "Station_1" 取代為 "Station 1" 的格式
+                formatted_station = station.strip().replace('_', ' ')
+                device_map[ip.replace('.', '_')] = {'Line': line.strip(), 'Station': formatted_station}
             except ValueError:
-                logging.error(f"Malformed mapping for IP {ip}: {mapping}")
+                logging.error(f"解析 IP {ip} 對應之格式錯誤: {mapping}")
 
     search_pattern = os.path.join(source_dir, f"{target_date}_*.txt")
     files = glob.glob(search_pattern)
     
     if not files:
-        logging.warning(f"No files found for date {target_date} in {source_dir}")
+        logging.warning(f"在 {source_dir} 找不到日期 {target_date} 的日誌檔")
         return
 
     all_data = []
@@ -515,18 +544,19 @@ def run_aggregation(target_date=None):
             continue
             
         ip_key = match.group(1)
-        meta = device_map.get(ip_key, {'Line': 'Unknown_Line', 'Station': f'Unknown_{ip_key}'})
+        meta = device_map.get(ip_key, {'Line': 'Unknown_Line', 'Station': f'Unknown {ip_key}'})
 
         try:
             df = pd.read_csv(file_path, sep='\t', encoding='cp950', on_bad_lines='skip', index_col=False)
             df.columns = df.columns.str.strip()
             
+            # 修正舊版軟體的欄位拼寫錯誤
             if 'Toral_Result' in df.columns:
                 df.rename(columns={'Toral_Result':'Total_Result'}, inplace=True)
-                logging.info(f"Fixed typo 'Toral_Result' in {filename}")
+                logging.info(f"已修正檔案 {filename} 中的錯字 'Toral_Result'")
 
             if 'Total_Result' not in df.columns:
-                logging.warning(f"Skipping {filename}: Missing 'Total_Result'")
+                logging.warning(f"跳過檔案 {filename}: 缺少 'Total_Result' 欄位")
                 continue
 
             df['Line_Name'] = meta['Line']
@@ -536,7 +566,7 @@ def run_aggregation(target_date=None):
             df['Total_Result'] = df['Total_Result'].astype(str)
             
             all_data.append(df)
-            logging.info(f"Processed: {filename} ({len(df)} rows)")
+            logging.info(f"已處理檔案: {filename} (共 {len(df)} 筆資料)")
 
         except UnicodeDecodeError:
             try:
@@ -548,12 +578,12 @@ def run_aggregation(target_date=None):
                 df['Log_Date'] = target_date
                 df['Total_Result'] = df['Total_Result'].astype(str)
                 all_data.append(df)
-                logging.info(f"Processed (UTF-8): {filename}")
+                logging.info(f"使用 UTF-8 編碼成功處理檔案: {filename}")
             except Exception as e2:
-                logging.error(f"Failed {filename} with UTF-8: {e2}")
+                logging.error(f"嘗試 UTF-8 編碼讀取檔案 {filename} 失敗: {e2}")
 
         except Exception as e:
-            logging.error(f"Failed to read {filename}: {e}")
+            logging.error(f"讀取檔案 {filename} 發生未知錯誤: {e}")
 
     if all_data:
         master_df = pd.concat(all_data, ignore_index=True)
@@ -563,9 +593,9 @@ def run_aggregation(target_date=None):
             master_df.to_excel(writer, sheet_name=target_date, index=False)
             create_summary_dashboard(writer, master_df, target_date)
             
-        logging.info(f"Aggregation Complete. File: {output_file}")
+        logging.info(f"資料整合完畢。輸出檔案為: {output_file}")
     else:
-        logging.warning("No valid data found.")
+        logging.warning("未找到有效資料，無法產出報表。")
 
 if __name__ == "__main__":
     run_aggregation()
