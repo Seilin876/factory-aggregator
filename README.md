@@ -6,7 +6,7 @@ Markdown
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## 專案概述 (Project Overview)
-本專案為一套專為工業生產環境設計的自動化數據彙整工具 (Automated Data Aggregation Tool)。旨在解決工廠端原始日誌 (Raw Logs) 格式破碎、跨設備數據孤島 (Data Silos) 之問題。透過高效能的數據處理管線 (Data Pipeline)，將分散的 Log 檔案自動彙整為具備視覺化指標的 Excel 儀表板 (Executive Dashboard)。
+本專案為一套工業生產環境的自動化數據彙整工具 。旨在解決測試製程原始日誌 (Raw logs) 格式破碎、跨設備數據孤島 (Data Silos) 之問題。透過測試Program之數據，將分散的txt檔案自動彙整為視覺化的 Excel  Dashboard。
 
 ## 核心功能 (Core Features)
 * **多源數據彙整 (Multi-source Aggregation)**：自動遍歷指定目錄，解析不同設備產出的異質 Log 格式。
