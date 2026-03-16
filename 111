@@ -1,0 +1,58 @@
+import pandas as pd
+import glob
+import os
+
+# 1. 定義標準欄位架構 (Target Schema)
+target_columns = [
+    "Time", "Barcode", "Model_Name", "Voltage", "Duty", "Total_Result", 
+    "Section", "Intelligent_Control", "dB(A)", "RPM", "index1", "index2", 
+    "index3", "Index1_Limit", "Index2_Limit", "Index3_Limit", "RPM_Low", 
+    "RPM_Up", "Range_Up", "Range_Low", "1P", "2P", "3P", "4P", "RPM1", 
+    "RPM2", "RPM3", "RPM4", "RPM5", "RPM6", "Spectrum_Control", 
+    "1/n_Octave", "Criteria_Path", "Spectrum_OK?", "Overall_Noise?", 
+    "500", "630", "800", "1000", "1250", "1600", "2000", "2500", 
+    "3150", "4000", "5000", "6300", "8000", "10000", "LineName", 
+    "BoxName", "MESResult", "ProgramVersion"
+]
+
+def merge_logs(folder_path, output_filename="Merged_Factory_Log.csv"):
+    # 2. 獲取資料夾內所有 txt 檔案 (File Discovery)
+    # 支援你提到的三種命名格式的統配符
+    file_pattern = os.path.join(folder_path, "*.txt")
+    all_files = glob.glob(file_pattern)
+    
+    if not all_files:
+        print("查無匹配的 .txt 檔案。")
+        return
+
+    all_dataframes = []
+
+    for file in all_files:
+        try:
+            # 3. 讀取檔案 (Parsing)
+            # 假設檔案為 Tab 分隔 (基於你提供的 Time\tBarcode 結構)
+            # 若為 CSV 格式請將 sep='\t' 改為 sep=','
+            temp_df = pd.read_csv(file, sep='\t', on_bad_lines='warn', encoding='utf-8')
+            
+            # 4. 強制對齊欄位 (Reindexing)
+            # 存在的欄位會保留，不存在的會補 NaN (空白)
+            temp_df = temp_df.reindex(columns=target_columns)
+            
+            all_dataframes.append(temp_df)
+            print(f"已處理: {os.path.basename(file)}")
+            
+        except Exception as e:
+            print(f"檔案 {file} 讀取失敗: {e}")
+
+    # 5. 合併與匯出 (Concatenation & Export)
+    if all_dataframes:
+        final_df = pd.concat(all_dataframes, ignore_index=True)
+        # 將 NaN 轉換為空字串，符合你「無內容就空白」的要求
+        final_df.to_csv(output_filename, index=False, encoding='utf-8-sig')
+        print(f"\n任務完成！整合檔案已儲存為: {output_filename}")
+        print(f"總計合併列數: {len(final_df)}")
+
+# 執行區塊 (路徑請根據你的 Mac Mini 環境修改)
+if __name__ == "__main__":
+    path = "./your_log_folder"  # 請替換為你的資料夾路徑
+    merge_logs(path)
