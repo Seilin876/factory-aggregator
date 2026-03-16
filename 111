@@ -1,8 +1,9 @@
 import pandas as pd
 import glob
 import os
+import re
 
-# 1. 定義標準欄位架構 (Target Schema)
+# 1. 標準欄位架構 (Target Schema)
 target_columns = [
     "Time", "Barcode", "Model_Name", "Voltage", "Duty", "Total_Result", 
     "Section", "Intelligent_Control", "dB(A)", "RPM", "index1", "index2", 
@@ -15,44 +16,59 @@ target_columns = [
     "BoxName", "MESResult", "ProgramVersion"
 ]
 
-def merge_logs(folder_path, output_filename="Merged_Factory_Log.csv"):
-    # 2. 獲取資料夾內所有 txt 檔案 (File Discovery)
-    # 支援你提到的三種命名格式的統配符
+def merge_logs(folder_path, output_filename="Merged_Noise_Test_Log.csv"):
     file_pattern = os.path.join(folder_path, "*.txt")
     all_files = glob.glob(file_pattern)
     
     if not all_files:
-        print("查無匹配的 .txt 檔案。")
+        print(f"錯誤：在 {folder_path} 內找不到 .txt 檔案。")
         return
 
     all_dataframes = []
 
     for file in all_files:
         try:
-            # 3. 讀取檔案 (Parsing)
-            # 假設檔案為 Tab 分隔 (基於你提供的 Time\tBarcode 結構)
-            # 若為 CSV 格式請將 sep='\t' 改為 sep=','
-            temp_df = pd.read_csv(file, sep='\t', on_bad_lines='warn', encoding='utf-8')
+            filename = os.path.basename(file)
+            date_match = re.search(r'(\d{8})', filename)
+            file_date = date_match.group(1) if date_match else "Unknown"
+
+            # 【修正關鍵】：加入 index_col=False 防止 Time 欄位被吃掉
+            # 同時加入 low_memory=False 處理大型工廠數據
+            temp_df = pd.read_csv(
+                file, 
+                sep='\t', 
+                index_col=False, 
+                on_bad_lines='warn', 
+                encoding='utf-8',
+                low_memory=False
+            )
             
-            # 4. 強制對齊欄位 (Reindexing)
-            # 存在的欄位會保留，不存在的會補 NaN (空白)
+            # 確保讀取的欄位名稱沒有前後空格 (Data Cleaning)
+            temp_df.columns = temp_df.columns.str.strip()
+            
+            # 對齊欄位
             temp_df = temp_df.reindex(columns=target_columns)
             
+            # 插入追蹤標籤
+            temp_df.insert(0, 'Source_File', filename)
+            temp_df.insert(1, 'Log_Date', file_date)
+            
             all_dataframes.append(temp_df)
-            print(f"已處理: {os.path.basename(file)}")
+            print(f"成功加載: {filename}")
             
         except Exception as e:
-            print(f"檔案 {file} 讀取失敗: {e}")
+            print(f"警告：讀取 {filename} 時出錯 - {e}")
 
-    # 5. 合併與匯出 (Concatenation & Export)
     if all_dataframes:
         final_df = pd.concat(all_dataframes, ignore_index=True)
-        # 將 NaN 轉換為空字串，符合你「無內容就空白」的要求
+        # 轉換所有 NaN 為空字串
+        final_df = final_df.fillna('')
+        
         final_df.to_csv(output_filename, index=False, encoding='utf-8-sig')
-        print(f"\n任務完成！整合檔案已儲存為: {output_filename}")
-        print(f"總計合併列數: {len(final_df)}")
+        print("-" * 30)
+        print(f"任務成功！整合檔案儲存於: {os.path.abspath(output_filename)}")
+        print(f"總處理檔案數: {len(all_dataframes)}")
 
-# 執行區塊 (路徑請根據你的 Mac Mini 環境修改)
 if __name__ == "__main__":
-    path = "./your_log_folder"  # 請替換為你的資料夾路徑
-    merge_logs(path)
+    log_path = r"E:\project\Noise_test\C13\1\test_log"
+    merge_logs(log_path)
