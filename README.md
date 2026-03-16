@@ -9,16 +9,16 @@ Markdown
 本專案為一套工業生產環境的自動化數據彙整工具 。旨在解決測試製程原始日誌 (Raw logs) 格式破碎、跨設備數據孤島 (Data Silos) 之問題。透過測試Program之數據，將分散的txt檔案自動彙整為視覺化的 Excel  Dashboard。
 
 ## 核心功能 (Core Features)
-* **多源數據彙整 (Multi-source Aggregation)**：自動遍歷指定目錄，解析不同設備產出的異質 Log 格式。
-* **數據清洗與標準化 (ETL Process)**：執行去重 (Deduplication)、缺失值處理及格式標準化作業。
-* **自動化儀表板 (Automated Dashboarding)**：利用 `pandas` 與 `XlsxWriter` 引擎，生成內含樞紐分析與統計圖表之 Excel 報表。
-* **二級思考架構 (Second-Order Thinking Implementation)**：預留錯誤捕捉機制，確保在 Log 格式突發性變動時仍能維持系統穩定性 (System Robustness)。
+* **多源數據彙整**：自動遍歷指定目錄，解析不同設備產出的異質 Log 格式。
+* **數據清洗與標準化**：執行去重 (Deduplication)、缺失值處理及格式標準化作業。
+* **自動化儀表板**：利用 `pandas` 與 `XlsxWriter` 引擎，生成內含樞紐分析與統計圖表之 Excel 報表。
+* **二級思考架構**：預留錯誤捕捉機制，確保在 Log 格式突發性變動時仍能穩定執行主程式。
 
 ## 技術棧 (Technology Stack)
 * **Language**: Python 3.x
 * **Core Libraries**: 
-    * `pandas`: 用於大規模數據操縱與分析 (Data Manipulation)。
-    * `openpyxl` / `XlsxWriter`: 驅動 Excel 檔案生成的進階引擎。
+    * `pandas`: 用於大規模數據操縱與分析。
+    * `openpyxl` / `XlsxWriter`: 驅動 Excel 檔案生成的進階函數庫。
     * `os` / `glob`: 執行系統層級的檔案檢索與路徑管理。
 
 ## 快速開始 (Quick Start)
